@@ -52,6 +52,8 @@ static ngx_int_t ngx_http_upstream_intercept_errors(ngx_http_request_t *r,
 static ngx_int_t ngx_http_upstream_test_connect(ngx_connection_t *c);
 static ngx_int_t ngx_http_upstream_process_headers(ngx_http_request_t *r,
     ngx_http_upstream_t *u);
+static ngx_int_t ngx_http_upstream_process_trailers(ngx_http_request_t *r,
+    ngx_http_upstream_t *u);
 static void ngx_http_upstream_process_body_in_memory(ngx_http_request_t *r,
     ngx_http_upstream_t *u);
 static void ngx_http_upstream_send_response(ngx_http_request_t *r,
@@ -475,7 +477,7 @@ ngx_http_upstream_create(ngx_http_request_t *r)
         ngx_http_upstream_cleanup(r);
     }
 
-    u = ngx_pcalloc(r->pool, sizeof(ngx_http_upstream_t));
+    u = ngx_pcalloc(r->pool, sizeof(ngx_http_upstream_t)); /* u是在r的池子上分配的 所以u->data = r没关系 */
     if (u == NULL) {
         return NGX_ERROR;
     }
@@ -764,7 +766,7 @@ ngx_http_upstream_init_request(ngx_http_request_t *r)
         }
 
         ctx->name = *host;
-        ctx->handler = ngx_http_upstream_resolve_handler;
+        ctx->handler = ngx_http_upstream_resolve_handler; /* 设置解析域名的handler 动态域名走这里 */
         ctx->data = r;
         ctx->timeout = clcf->resolver_timeout;
 
@@ -777,7 +779,7 @@ ngx_http_upstream_init_request(ngx_http_request_t *r)
             return;
         }
 
-        return;
+        return; /* 动态域名解析时不能使用keepalive */
     }
 
 found:
@@ -1471,23 +1473,11 @@ ngx_http_upstream_connect(ngx_http_request_t *r, ngx_http_upstream_t *u)
 
     if (rc == NGX_BUSY) { /* 服务器不活跃 */
         ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "no live upstreams");
-#if (NGX_HTTP_MULTIPLEXING_UPS && NGX_HTTP_GRPC_MULTIPLEXING)
-        if (u->multiple) {
-            ngx_http_multi_upstreams_next(r, u, NGX_HTTP_UPSTREAM_FT_NOLIVE);
-            return;
-        }
-#endif
         ngx_http_upstream_next(r, u, NGX_HTTP_UPSTREAM_FT_NOLIVE);
         return;
     }
 
     if (rc == NGX_DECLINED) { /* 服务器负载过重 */
-#if (NGX_HTTP_MULTIPLEXING_UPS && NGX_HTTP_GRPC_MULTIPLEXING)
-        if (u->multiple) {
-            ngx_http_multi_upstreams_next(r, u, NGX_HTTP_UPSTREAM_FT_ERROR);
-            return;
-        }
-#endif
         ngx_http_upstream_next(r, u, NGX_HTTP_UPSTREAM_FT_ERROR);
         return;
     }
@@ -2056,11 +2046,11 @@ ngx_http_upstream_send_request_body(ngx_http_request_t *r,
        return ngx_output_chain(&u->output, out);
     }
 
-    if (!u->request_sent) {
+    if (!u->request_sent) { /* 第一次发送 */
         u->request_sent = 1;
         out = u->request_bufs;
 
-        if (r->request_body->bufs) {
+        if (r->request_body->bufs) { /* 把request_body->bufs挂到u->request_bufs(grpc构造的报文)后面 */
             for (cl = out; cl->next; cl = out->next) { /* void */ }
             cl->next = r->request_body->bufs;
             r->request_body->bufs = NULL;
@@ -2088,13 +2078,13 @@ ngx_http_upstream_send_request_body(ngx_http_request_t *r,
         r->read_event_handler = ngx_http_upstream_read_request_handler;
 
     } else {
-        out = NULL;
+        out = NULL; /* 没发送完全 当然置null 因为不必再copy一遍参数 */
     }
 
-    for ( ;; ) {
+    for ( ;; ) { /* 直至读不到 */
 
         if (do_write) {
-            rc = ngx_output_chain(&u->output, out);
+            rc = ngx_output_chain(&u->output, out); /* 向上游发送数据 会调用 u->output->filter */
 
             if (rc == NGX_ERROR) {
                 return NGX_ERROR;
@@ -2106,7 +2096,7 @@ ngx_http_upstream_send_request_body(ngx_http_request_t *r,
                 ngx_free_chain(r->pool, ln);
             }
 
-            if (rc == NGX_OK && !r->reading_body) {
+            if (rc == NGX_OK && !r->reading_body) { /* 不需要读了 */
                 break;
             }
         }
@@ -2126,12 +2116,12 @@ ngx_http_upstream_send_request_body(ngx_http_request_t *r,
 
         /* stop if there is nothing to send */
 
-        if (out == NULL) {
-            rc = NGX_AGAIN;
+        if (out == NULL) { /* 前端没读到 */
+            rc = NGX_AGAIN; /* 没读到返回 AGAIN 是为了表示没读完所以也没有写完 */
             break;
         }
 
-        do_write = 1;
+        do_write = 1; /* 从前端读到 可以写了 */
     }
 
     if (!r->reading_body) {
@@ -2362,8 +2352,8 @@ ngx_http_upstream_process_header(ngx_http_request_t *r, ngx_http_upstream_t *u) 
 
     if (u->headers_in.status_n >= NGX_HTTP_SPECIAL_RESPONSE) { /* 是根据头部处理的值进行操作的：如果返回的HTTPstatus是错误码的话 */
 
-        if (ngx_http_upstream_test_next(r, u) == NGX_OK) {
-            return;
+        if (ngx_http_upstream_test_next(r, u) == NGX_OK) { /* 返回OK的时候已经调用next了 */
+            return; /* 如果Decline了，就继续走 */
         }
 
         if (ngx_http_upstream_intercept_errors(r, u) == NGX_OK) {
@@ -2427,11 +2417,11 @@ ngx_http_upstream_test_next(ngx_http_request_t *r, ngx_http_upstream_t *u)
 
     for (un = ngx_http_upstream_next_errors; un->status; un++) {
 
-        if (status != un->status) {
+        if (status != un->status) { /* 可以由用户设置的大集合 */
             continue;
         }
 
-        if (u->peer.tries > 1 && (u->conf->next_upstream & un->mask)) {
+        if (u->peer.tries > 1 && (u->conf->next_upstream & un->mask)) { /* 匹配用户设置的可以重连类型的小集合 */
             ngx_http_upstream_next(r, u, un->mask);
             return NGX_OK;
         }
@@ -2507,7 +2497,7 @@ ngx_http_upstream_test_next(ngx_http_request_t *r, ngx_http_upstream_t *u)
 
 #endif
 
-    return NGX_DECLINED;
+    return NGX_DECLINED; /* 一个都没匹配上 */
 }
 
 
@@ -2773,6 +2763,51 @@ ngx_http_upstream_process_headers(ngx_http_request_t *r, ngx_http_upstream_t *u)
     }
 
     u->length = -1; /* 太重要了叭 */
+
+    return NGX_OK;
+}
+
+
+static ngx_int_t
+ngx_http_upstream_process_trailers(ngx_http_request_t *r,
+    ngx_http_upstream_t *u)
+{
+    ngx_uint_t        i;
+    ngx_list_part_t  *part;
+    ngx_table_elt_t  *h, *ho;
+
+    if (!u->conf->pass_trailers) {
+        return NGX_OK;
+    }
+
+    part = &u->headers_in.trailers.part;
+    h = part->elts;
+
+    for (i = 0; /* void */; i++) {
+
+        if (i >= part->nelts) {
+            if (part->next == NULL) {
+                break;
+            }
+
+            part = part->next;
+            h = part->elts;
+            i = 0;
+        }
+
+        if (ngx_hash_find(&u->conf->hide_headers_hash, h[i].hash,
+                          h[i].lowcase_key, h[i].key.len))
+        {
+            continue;
+        }
+
+        ho = ngx_list_push(&r->headers_out.trailers);
+        if (ho == NULL) {
+            return NGX_ERROR;
+        }
+
+        *ho = h[i];
+    }
 
     return NGX_OK;
 }
@@ -4370,6 +4405,12 @@ ngx_http_upstream_finalize_request(ngx_http_request_t *r,
     }
 
     if (rc == 0) {
+
+        if (ngx_http_upstream_process_trailers(r, u) != NGX_OK) {
+            ngx_http_finalize_request(r, NGX_ERROR);
+            return;
+        }
+
         rc = ngx_http_send_special(r, NGX_HTTP_LAST);
 
     } else if (flush) {
@@ -6611,14 +6652,14 @@ ngx_http_multi_upstreams_send_request_handler(ngx_http_multi_upstreams_t *mus)
         r = item->data;
         if (!item->request_sent 
             && ngx_http_upstream_test_connect(c) != NGX_OK) {
-            ngx_http_multi_upstreams_next(r, item,
+            ngx_http_multi_upstreams_next(item->mus, item,
                                       NGX_HTTP_UPSTREAM_FT_ERROR);
             return;
         }
         rc = ngx_http_upstream_send_request_body(r, item, 1);
 
         if (rc == NGX_ERROR) {
-            ngx_http_multi_upstreams_next(r, item,
+            ngx_http_multi_upstreams_next(item->mus, item,
                                       NGX_HTTP_MULTI_UPS_STREAM_ERROR);
             return;
         }
@@ -6710,7 +6751,7 @@ ngx_http_multi_upstreams_read_event_handler(ngx_http_multi_upstreams_t *mus)
 
     if (ngx_http_upstream_test_connect(c) != NGX_OK) {
         ngx_http_multi_upstreams_next(mus, NULL,
-                                  NGX_HTTP_MULTI_UPS_CONN_ERROR);
+                                  NGX_HTTP_UPSTREAM_FT_ERROR);
         return;
     }
 
@@ -6762,7 +6803,7 @@ ngx_http_multi_upstreams_read_event_handler(ngx_http_multi_upstreams_t *mus)
 
         if (n == NGX_ERROR || n == 0) {
             ngx_http_multi_upstreams_next(mus, NULL,
-                                      NGX_HTTP_MULTI_UPS_CONN_ERROR);
+                                      NGX_HTTP_UPSTREAM_FT_ERROR);
             return;
         }
 
@@ -6949,7 +6990,7 @@ ngx_http_multi_upstreams_parse_frame(ngx_http_multi_upstreams_t *mus)
         mus->last_stream = NULL;
         mus->rest = 0;
         ngx_http_multi_upstreams_discard_frame(mus);
-        ngx_http_multi_upstreams_next(u->data, u,
+        ngx_http_multi_upstreams_next(u->mus, u,
                                         NGX_HTTP_MULTI_UPS_STREAM_ERROR);
         return;
     }
@@ -7041,11 +7082,11 @@ ngx_http_multi_upstreams_copy_buffer(ngx_http_multi_upstreams_t *mus)
     }
 
     /* buffer is too small to receive one frame */
-    if (size > ub.last - ub.pos) {
+    if ((ssize_t)mus->rest > ub.last - ub.pos) {
         ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
                      "upstream buffer is too small to "
                      "received %uz data frame with buffer size %uz",
-                      size, ub.last - ub.pos);
+                      (ssize_t)mus->rest, ub.last - ub.pos);
         ngx_http_multi_upstreams_finalize_request(r, u,
                                                NGX_HTTP_MULTI_UPS_STREAM_ERROR);
         return;
@@ -7114,7 +7155,7 @@ ngx_http_multi_upstreams_copy_buffer(ngx_http_multi_upstreams_t *mus)
 }
 
 
-/* discard data form mus->buffer */
+/* discard data from mus->buffer */
 static void
 ngx_http_multi_upstreams_discard_frame(ngx_http_multi_upstreams_t *mus)
 {
@@ -7183,7 +7224,7 @@ ngx_http_multi_upstreams_process_conn_frame(ngx_http_multi_upstreams_t *mus)
         {
             stream_id = ngx_http_multi_upstreams_get_stream_id(u->data);
             if (mus->conn_ctx->stream_id < stream_id) {
-                ngx_http_multi_upstreams_next(u->data, u,
+                ngx_http_multi_upstreams_next(u->mus, u,
                                         NGX_HTTP_MULTI_UPS_STREAM_ERROR);
             }
         }
@@ -7204,7 +7245,7 @@ ngx_http_multi_upstreams_process_conn_frame(ngx_http_multi_upstreams_t *mus)
     /* 
      * If it returns NGX_ERROR, according to the protocol
      * it should be treated as a connection error, so we
-     * should send a goaway frame and close the TCP 
+     * should send a goaway frame and then close the TCP 
      * connection. BUT! The implementation of gRPC of 
      * Nginx seems only to close the connection rather 
      * than send a goaway frame before that. Thus, we 
@@ -7230,7 +7271,7 @@ ngx_http_multi_upstreams_process_conn_frame(ngx_http_multi_upstreams_t *mus)
     {
         if (u->stream_error) {
             u->stream_error = 0;
-            ngx_http_multi_upstreams_next(u->data, u, 
+            ngx_http_multi_upstreams_next(u->mus, u,
                                           NGX_HTTP_MULTI_UPS_STREAM_ERROR);
         }
     }
@@ -7259,14 +7300,14 @@ ngx_http_multi_upstreams_process_frame(ngx_http_upstream_t *u)
 
         /* error */
         if (rc == NGX_AGAIN) {
-            ngx_http_multi_upstreams_next(u->data, u, 
+            ngx_http_multi_upstreams_next(u->mus, u, 
                                           NGX_HTTP_MULTI_UPS_CONN_ERROR);
             return;
         }
 
         /* include situation receiving EOS */
         if (rc == NGX_HTTP_UPSTREAM_INVALID_HEADER) {
-            ngx_http_multi_upstreams_next(r, u, 
+            ngx_http_multi_upstreams_next(u->mus, u, 
                                           NGX_HTTP_UPSTREAM_FT_INVALID_HEADER);
             return;
         }
@@ -7395,7 +7436,6 @@ ngx_http_multi_upstreams_next(ngx_http_multi_upstreams_t *mus,
      */
     
     /* 有的已经向下游发送消息的就不再连接了 */
-    /* u == NULL 表示 data = mus u != NULL 表示 data = r */
     /* 处理写队列 */
     /* 处理有的r的前端connection断开了 */
     /* 处理peer.tries 以每个r的peer tries为粒度 */
@@ -7404,26 +7444,32 @@ ngx_http_multi_upstreams_next(ngx_http_multi_upstreams_t *mus,
     /* 因为会调用upstream connect 所以那里面会send request */
     /* 假如goaway = 1 且上面没upstream了 */
 
+    ngx_log_t                        *log;
     ngx_msec_t                        timeout;
-    ngx_uint_t                        status, state;
+    ngx_uint_t                        status, state, do_with_whole;
     ngx_connection_t                 *c;
     ngx_http_multi_upstreams_t       *mus;
 
     if (u == NULL) {
-        mus = data;
-        for ()
+        do_with_whole = 1;
+        log = mus->c->log;
+
+    } else {
+        do_with_whole = 0;
+        log = u->data->connection->log;
     }
 
     c = u->peer.connection;
 
-    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, c->log, 0,
+    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, log, 0,
                    "http next upstream, %xi", ft_type);
     
     if (u->peer.sockaddr) {
 
         if (ft_type == NGX_HTTP_UPSTREAM_FT_HTTP_403
             || ft_type == NGX_HTTP_UPSTREAM_FT_HTTP_404
-            || ft_type == NGX_HTTP_MULTI_UPS_STREAM_ERROR)
+            || ft_type == NGX_HTTP_MULTI_UPS_STREAM_ERROR
+            || ft_type == NGX_HTTP_MULTI_UPS_CONN_ERROR)
         {
             state = NGX_PEER_NEXT;
         
@@ -7436,9 +7482,11 @@ ngx_http_multi_upstreams_next(ngx_http_multi_upstreams_t *mus,
     }
 
     if (ft_type == NGX_HTTP_UPSTREAM_FT_TIMEOUT) {
-        ngx_log_error(NGX_LOG_ERR, r->connection->log, NGX_ETIMEDOUT,
+        ngx_log_error(NGX_LOG_ERR, log, NGX_ETIMEDOUT,
                       "upstream timed out");
     }
+
+    if (u->peer)
 }
 
 
