@@ -100,6 +100,7 @@ NGX_ALL_MODULES="
     ngx_http_fastcgi_module
     ngx_http_uwsgi_module
     ngx_http_scgi_module
+    ngx_http_grpc_module
     ngx_http_perl_module
     ngx_http_memcached_module
     ngx_http_empty_gif_module
@@ -237,6 +238,7 @@ HTTP_PROXY=YES
 HTTP_FASTCGI=YES
 HTTP_UWSGI=YES
 HTTP_SCGI=YES
+HTTP_GRPC=YES
 HTTP_PERL=NO
 HTTP_LUA=NO
 HTTP_TFS=NO
@@ -600,6 +602,7 @@ do
                                          HTTP_UWSGI_SHARED=NO       ;;
         --without-http_scgi_module)      HTTP_SCGI=NO
                                          HTTP_SCGI_SHARED=NO        ;;
+        --without-http_grpc_module)      HTTP_GRPC=NO               ;;
         --without-http_memcached_module) HTTP_MEMCACHED=NO
                                          HTTP_MEMCACHED_SHARED=NO   ;;
         --without-http_limit_zone_module)
@@ -870,6 +873,7 @@ cat << END
   --without-http_fastcgi_module      disable ngx_http_fastcgi_module
   --without-http_uwsgi_module        disable ngx_http_uwsgi_module
   --without-http_scgi_module         disable ngx_http_scgi_module
+  --without-http_grpc_module         disable ngx_http_grpc_module
   --without-http_memcached_module    disable ngx_http_memcached_module
   --without-http_limit_conn_module   disable ngx_http_limit_conn_module
   --without-http_limit_req_module    disable ngx_http_limit_req_module

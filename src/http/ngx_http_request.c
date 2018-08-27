@@ -3522,6 +3522,13 @@ ngx_http_free_request(ngx_http_request_t *r, ngx_int_t rc)
         cln = cln->next;
     }
 
+#if (NGX_HTTP_MULTIPLEXING_UPS)
+        if (r->queue) {
+            printf("remove r from upstream\n");
+            /* remove from queue */
+            ngx_queue_remove(r->queue);
+        }
++#endif
 #if (NGX_STAT_STUB)
 
     if (r->stat_reading) {

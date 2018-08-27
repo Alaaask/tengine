@@ -204,6 +204,20 @@ struct ngx_connection_s {
 #if (NGX_THREADS)
     ngx_thread_task_t  *sendfile_task;
 #endif
+
+#if (NGX_HTTP_MULTIPLEXING_UPS)
+    unsigned int        connection_id;
+    unsigned            multiple:1;
+    unsigned            multiple_cached:1;
+    void               *multiple_item;
+    ngx_queue_t        *multiple_hash_tb;
+#if (NGX_HTTP_GRPC_MULTIPLEXING)
+    ngx_http_multi_upstreams_t      
+                       *mus;
+    unsigned            goaway:1;
+#endif
+#endif
+
 };
 
 

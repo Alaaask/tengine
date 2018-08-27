@@ -1045,6 +1045,12 @@ ngx_free_connection(ngx_connection_t *c)
 }
 
 
+#if (NGX_HTTP_MULTIPLEXING_UPS)
+void
+ngx_http_multiplexing_ups_free(ngx_connection_t *c);
+#endif
+
+
 void
 ngx_close_connection(ngx_connection_t *c)
 {
@@ -1075,6 +1081,13 @@ ngx_close_connection(ngx_connection_t *c)
             ngx_del_async_conn(c, NGX_DISABLE_EVENT);
             c->num_async_fds--;
         }
+    }
+#endif
+
+#if (NGX_HTTP_MULTIPLEXING_UPS)
+    if (c->multiple_item) {
+    /* remove from queue */
+        ngx_http_multiplexing_ups_free(c);
     }
 #endif
 

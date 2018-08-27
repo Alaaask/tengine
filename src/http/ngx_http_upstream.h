@@ -1,3 +1,4 @@
+
 /*
  * Copyright (C) Igor Sysoev
  * Copyright (C) Nginx, Inc.
@@ -30,6 +31,11 @@
 #define NGX_HTTP_UPSTREAM_FT_MAX_WAITING     0x00001000
 #define NGX_HTTP_UPSTREAM_FT_NOLIVE          0x40000000
 #define NGX_HTTP_UPSTREAM_FT_OFF             0x80000000
+
+#if (NGX_HTTP_MULTIPLEXING_UPS && NGX_HTTP_GRPC_MULTIPLEXING)
+#define NGX_HTTP_MULTI_UPS_CONN_ERROR        0x00002000
+#define NGX_HTTP_MULTI_UPS_STREAM_ERROR      0x00004000
+#endif
 
 #define NGX_HTTP_UPSTREAM_FT_STATUS          (NGX_HTTP_UPSTREAM_FT_HTTP_500  \
                                              |NGX_HTTP_UPSTREAM_FT_HTTP_502  \
@@ -392,12 +398,71 @@ struct ngx_http_upstream_s {
 
     unsigned                         request_sent:1;
     unsigned                         header_sent:1;
+
+#if (NGX_HTTP_MULTIPLEXING_UPS)
+    unsigned                         multiple:1;
+#if (NGX_HTTP_GRPC_MULTIPLEXING)
+    ngx_http_multi_upstreams_t      *mus;
+    ngx_queue_t                      wait_wr_in_queue;
+    void                            *data; /* request */
+    unsigned                         stream_error:1;
+    ngx_http_multi_ups_read_state_e  read_state;
+#endif
+#endif
 };
 
 
+#if (NGX_HTTP_MULTIPLEXING_UPS && NGX_HTTP_GRPC_MULTIPLEXING)
+
+#define NGX_HTTP_MULTI_UPS_CONN_FRAME_BUFFER 8192
+#define NGX_HTTP_MULTI_UPS_STREAMID_NOT_FOUND 0
+
+typedef void (*ngx_http_upstreams_handler_pt)(ngx_http_multi_upstreams_t *mus);
+
 typedef struct {
-    ngx_uint_t                      status;
-    ngx_uint_t                      mask;
+    ngx_http_upstreams_handler_pt    read_event_handler;
+    ngx_http_upstreams_handler_pt    write_event_handler;
+
+    ngx_array_t                     *upstreams; /* 复用同一connection的upstream们 */
+    ngx_connection_t                 c; /* 复用的connection */
+
+    ngx_buf_t                        buffer; /* 接收upstream server发来数据的缓冲区 */
+    size_t                           buffer_size; /* 改:这个未设置 上面两个buf大小一样 */
+    ngx_buf_t                        frame; /* 放流id = 0的frame */
+
+    
+    ngx_http_grpc_ctx_t             *conn_ctx;
+    
+    ngx_queue_t                      wait_write_queue; /* 等待写的upstream们 */
+    void                            *last_stream; /* 可能指向upstream ，也可能指向mus */
+    size_t                           rest; /* frame剩余未搬运的length 是加上9 bytes的 */
+    size_t                           discard_rest;
+    
+    ngx_msec_t                       read_timeout; /* 这俩都是第一个upstream的超时 用以处理connection级别 而不是upstream级别 */
+    ngx_msec_t                       send_timeout;
+    ngx_uint_t                       tries; /* 剩余重连的次数 */
+    ngx_str_t                        schema; /* grpc or grpcs */
+    size_t                           send_lowat;
+    
+    unsigned                         ssl:1;
+
+#if (NGX_HTTP_SSL)
+    /* ssl to be continued */
+#endif
+
+} ngx_http_multi_upstreams_t;
+
+typedef enum {
+    ngx_http_multi_ups_st_header = 0,
+    ngx_http_multi_ups_st_body
+} ngx_http_multi_ups_read_state_e;
+
+#endif
+
+
+typedef struct {
+    ngx_uint_t                       status;
+    ngx_uint_t                       mask;
 } ngx_http_upstream_next_t;
 
 
@@ -425,6 +490,13 @@ ngx_int_t ngx_http_upstream_hide_headers_hash(ngx_conf_t *cf,
     ngx_http_upstream_conf_t *conf, ngx_http_upstream_conf_t *prev,
     ngx_str_t *default_hide_headers, ngx_hash_init_t *hash);
 
+#if (NGX_HTTP_MULTIPLEXING_UPS && NGX_HTTP_GRPC_MULTIPLEXING)
+ngx_uint_t ngx_http_multi_upstreams_get_stream_id(ngx_http_request_t *r);
+ngx_int_t ngx_http_multi_upstreams_parse_goaway(ngx_http_multi_upstreams_t *mus);
+ngx_int_t ngx_http_multi_upstreams_parse_window_update(ngx_http_multi_upstreams_t *mus);
+ngx_int_t ngx_http_multi_upstreams_parse_settings(ngx_http_multi_upstreams_t *mus);
+ngx_int_t ngx_http_multi_upstreams_parse_ping(ngx_http_multi_upstreams_t *mus);
+#endif
 
 #define ngx_http_conf_upstream_srv_conf(uscf, module)                         \
     uscf->srv_conf[module.ctx_index]
