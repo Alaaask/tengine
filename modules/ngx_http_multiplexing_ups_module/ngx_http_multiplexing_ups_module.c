@@ -276,7 +276,10 @@ ngx_http_multiplexing_ups_get_peer(ngx_peer_connection_t *pc, void *data) /* Ste
             == 0)
         {
 
-            /* 改：增加ssl判断 */
+           if (u->ssl != c->ssl) {
+                continue;
+            }
+            
             if (item->connection->goaway) {
                 continue;
             }
