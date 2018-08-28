@@ -1574,7 +1574,7 @@ ngx_http_upstream_connect(ngx_http_request_t *r, ngx_http_upstream_t *u)
      * 所以在这里只需将当前连接的写事件添加到定时器机制中进行超时管理
      * 并return从当前函数返回
      */
-    if (rc == NGX_AGAIN) {
+    if (rc == NGX_AGAIN) { /* 复用的c(已经存在) 不会返回NGX_AGAIN 若为首次复用的c 则走这里也是对的 */
         ngx_add_timer(c->write, u->conf->connect_timeout);
         return;
     }
@@ -2993,7 +2993,7 @@ ngx_http_upstream_send_response(ngx_http_request_t *r, ngx_http_upstream_t *u)
         n = u->buffer.last - u->buffer.pos;
 #if (NGX_HTTP_MULTIPLEXING_UPS && NGX_HTTP_GRPC_MULTIPLEXING)
         if (u->multiple && n) {
-            ngx_http_multi_upstreams_finalize_request(r, u, NGX_HTTP_MULTI_UPS_CONN_ERROR);
+            ngx_http_multi_upstreams_finalize_request(u->mus, u, NGX_HTTP_MULTI_UPS_CONN_ERROR);
             return;
         }
 #endif
@@ -4109,7 +4109,7 @@ ngx_http_upstream_next(ngx_http_request_t *r, ngx_http_upstream_t *u,
 
     clcf = ngx_http_get_module_loc_conf(r, ngx_http_core_module);
 
-    if (clcf->retry_cached_connection
+    if (clcf->retry_cached_connection /* 自研指令 关闭对长连接的重连 可能要改 */
         && u->peer.cached && ft_type == NGX_HTTP_UPSTREAM_FT_ERROR
         && (!u->request_sent || !r->request_body_no_buffering)) {
         status = 0; /* 如果前端没问题会重连emmm */
@@ -6665,7 +6665,7 @@ ngx_http_multi_upstreams_send_request_handler(ngx_http_multi_upstreams_t *mus)
         }
 
         if (rc >= NGX_HTTP_SPECIAL_RESPONSE) {
-            ngx_http_multi_upstreams_finalize_request(r, item, rc);
+            ngx_http_multi_upstreams_finalize_request(mus, item, rc);
         }
 
         /* this upstream has not written completely */
@@ -7036,7 +7036,7 @@ ngx_http_multi_upstreams_copy_buffer(ngx_http_multi_upstreams_t *mus)
         if (ub.start == NULL) {
             ub.start = ngx_palloc(r->pool, u->conf->buffer_size);
             if (ub.start == NULL) {
-                ngx_http_multi_upstreams_finalize_request(r, u,
+                ngx_http_multi_upstreams_finalize_request(mus, u,
                                                NGX_HTTP_INTERNAL_SERVER_ERROR);
                 return;
             }
@@ -7052,7 +7052,7 @@ ngx_http_multi_upstreams_copy_buffer(ngx_http_multi_upstreams_t *mus)
                             sizeof(ngx_table_elt_t))
                 != NGX_OK)
             {
-                ngx_http_multi_upstreams_finalize_request(r, u,
+                ngx_http_multi_upstreams_finalize_request(mus, u,
                                                NGX_HTTP_INTERNAL_SERVER_ERROR);
                 return;
             }
@@ -7061,7 +7061,7 @@ ngx_http_multi_upstreams_copy_buffer(ngx_http_multi_upstreams_t *mus)
                             sizeof(ngx_table_elt_t))
                 != NGX_OK)
             {
-                ngx_http_multi_upstreams_finalize_request(r, u,
+                ngx_http_multi_upstreams_finalize_request(mus, u,
                                                NGX_HTTP_INTERNAL_SERVER_ERROR);
                 return;
             }
@@ -7087,7 +7087,7 @@ ngx_http_multi_upstreams_copy_buffer(ngx_http_multi_upstreams_t *mus)
                      "upstream buffer is too small to "
                      "received %uz data frame with buffer size %uz",
                       (ssize_t)mus->rest, ub.last - ub.pos);
-        ngx_http_multi_upstreams_finalize_request(r, u,
+        ngx_http_multi_upstreams_finalize_request(mus, u,
                                                NGX_HTTP_MULTI_UPS_STREAM_ERROR);
         return;
     }
@@ -7313,7 +7313,7 @@ ngx_http_multi_upstreams_process_frame(ngx_http_upstream_t *u)
         }
 
         if (rc == NGX_ERROR) {
-            ngx_http_multi_upstreams_finalize_request(r, u,
+            ngx_http_multi_upstreams_finalize_request(u->mus, u,
                                                NGX_HTTP_INTERNAL_SERVER_ERROR);
             return;
         }
@@ -7370,7 +7370,7 @@ ngx_http_multi_upstreams_non_buffered_upstream(ngx_http_upstream_t *u)
     if (wev->timeout) {
         c->timedout = 1;
         ngx_connection_error(c, NGX_ETIMEDOUT, "client timed out");
-        ngx_http_multi_upstreams_finalize_request(r, u, 
+        ngx_http_multi_upstreams_finalize_request(u->mus, u, 
                                                   NGX_HTTP_REQUEST_TIME_OUT);
         return;
     }
@@ -7381,7 +7381,7 @@ ngx_http_multi_upstreams_non_buffered_upstream(ngx_http_upstream_t *u)
         rc = ngx_http_output_filter(r, u->out_bufs);
 
         if (rc == NGX_ERROR) {
-            ngx_http_multi_upstreams_finalize_request(r, u, NGX_ERROR);
+            ngx_http_multi_upstreams_finalize_request(u->mus, u, NGX_ERROR);
             return;
         }
 
@@ -7393,12 +7393,12 @@ ngx_http_multi_upstreams_non_buffered_upstream(ngx_http_upstream_t *u)
         /* when receiving end of stream flag */
         if (u->length == 0) 
         {
-            ngx_http_multi_upstreams_finalize_request(r, u, 0);
+            ngx_http_multi_upstreams_finalize_request(u->mus, u, 0);
             return;
         }
 
         if (u->mus->c->read->error) {
-            ngx_http_multi_upstreams_finalize_request(NULL, u->mus,
+            ngx_http_multi_upstreams_finalize_request(u->mus, u
                                                       NGX_HTTP_BAD_GATEWAY);
             return;
         }
@@ -7410,7 +7410,7 @@ ngx_http_multi_upstreams_non_buffered_upstream(ngx_http_upstream_t *u)
         if (ngx_handle_write_event(c->write, clcf->send_lowat)
             != NGX_OK)
         {
-            ngx_http_multi_upstreams_finalize_request(r, u, NGX_ERROR);
+            ngx_http_multi_upstreams_finalize_request(u->mus, u, NGX_ERROR);
             return;
         }
     }
